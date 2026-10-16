@@ -1,0 +1,277 @@
+#include <ESP32Servo.h>
+#include <DHT.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <UrlEncode.h>
+
+DHT dht(7, DHT22);
+float temperature ;
+float humidade ;
+
+int cont = 0;
+
+int motor1 = 5;
+
+Servo servo1;
+
+int PIRpin = 8;
+int PIRstatus= 0;
+int Valorant= -1;
+int Movimento = 0;
+
+const int vertical = 10;    
+const int horizontal = 9;    
+const int SEL = 3;  
+int x = 0;        
+int y = 0;        
+int z = 0;     
+
+const int red = 14;
+const int green = 13;
+
+const int foto_OD = 6;
+
+bool tempAtiva = true;
+bool ldrAtivo = true;
+
+bool sistemaLigado = false;
+int ultimoEstadoBotao = HIGH;
+unsigned long tempoUltimoClique = 0;
+const unsigned long tempoDebounce = 250;
+int ultInput = 0;
+
+const char* ssid = "Wokwi-GUEST";
+const char* senha = "";
+ 
+String phoneNumber = "557192754181";
+String apiKey = "6918432";
+
+float means[3] = {22.19, 50.99, 596.83};
+float stds[3]  = {4.88, 10.01, 151.19};
+
+// -------- Pesos e Bias --------
+// Entrada -> Camada Oculta 1
+float w1[4][8] = {
+  {-1.63, -0.28, -0.23, -0.06, -0.07, -1.44, -0.47, -0.24},
+  {0.005, 0.056, -0.144, 1.055, 0.426, 0.020, -0.065, -0.082},
+  {0.002, 0.065, 0.032, -0.068, 0.019, -0.122, -0.147, 0.094},
+  {-0.261, 0.529, -0.674, 0.195, -0.246, -0.419, 0.126, 0.388}
+};
+float b1[8] = {-0.069, 1.730, 1.901, 1.627, 1.143, 0.172, 1.515, 1.373};
+
+// Camada Oculta 1 -> Oculta 2
+float w2[8][8] = {
+  {-1.562, -1.123, -1.699, -0.596, -1.515, 1.270, -1.326, -1.205},
+  {0.703, 0.472, 1.349, 0.968, 1.242, 1.228, 0.747, 1.349},
+  {0.198, 0.579, 0.451, 0.516, 0.716, -2.641, 1.080, 0.790},
+  {0.420, 0.870, 0.422, 1.039, 0.270, 0.676, 0.998, 0.548},
+  {-0.153, 0.874, 0.748, 0.701, 0.806, -1.941, 0.256, 0.093},
+  {0.536, 0.318, -0.030, -0.409, -0.047, -0.808, 0.369, 0.222},
+  {1.171, 0.825, 0.555, 0.981, 1.120, 1.141, 1.032, 0.976},
+  {0.903, 1.122, 0.754, 0.453, 0.567, 1.871, 0.557, 1.239}
+};
+float b2[8] = {1.100, 0.513, 0.738, 0.914, 0.386, -0.609, 0.328, 0.467};
+
+// Camada Oculta 2 -> Saída
+float w3[8] = {1.443, 1.393, 1.070, 1.322, 1.326, -2.943, 1.361, 0.973};
+float b3 = 0.977;
+
+// --------- Função de ativação ---------
+float relu(float x) {
+  return x > 0 ? x : 0;
+}
+
+
+float neuralNetwork(float temp, float umi, float luz, int movimento) {
+  // Normalizar entradas
+  float input[4] = {
+    (temp - means[0]) / stds[0],
+    (umi - means[1]) / stds[1],
+    (luz - means[2]) / stds[2],
+    (float)movimento
+  };
+
+  // Camada oculta 1
+  float layer1[8] = {0};
+  for (int i = 0; i < 8; i++) {
+    layer1[i] = b1[i];
+    for (int j = 0; j < 4; j++) {
+      layer1[i] += input[j] * w1[j][i];
+    }
+    layer1[i] = relu(layer1[i]);
+  }
+
+  // Camada oculta 2
+  float layer2[8] = {0};
+  for (int i = 0; i < 8; i++) {
+    layer2[i] = b2[i];
+    for (int j = 0; j < 8; j++) {
+      layer2[i] += layer1[j] * w2[j][i];
+    }
+    layer2[i] = relu(layer2[i]);
+  }
+
+  // Saída da rede neural
+  float output = b3;
+  for (int i = 0; i < 8; i++) {
+    output += layer2[i] * w3[i];
+  }
+
+  // Aumentar em 30% se o PIR detectar movimento
+  if (movimento == 1) {
+    output *= 1.30;
+  }
+
+  return output;
+}
+
+
+void connect()
+{
+  if(cont == 0)
+  {
+    WiFi.begin(ssid, password);
+    Serial.println("Conectando");
+
+    while(WiFi.status() != WL_CONNECTED) 
+    {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.print("\nConectado na rede WiFI com IP: ");
+    Serial.println(WiFi.localIP());
+  }
+
+  else
+  {
+    WiFi.reconnect();
+  }
+}
+
+void sendMessage(String message){
+ 
+  // Data to send with HTTP POST
+  String url = "https://api.callmebot.com/whatsapp.php?phone=" + phoneNumber + "&apikey=" + apiKey + "&text=" + urlEncode(message);
+  HTTPClient http;
+  http.begin(url);
+  
+  // Specify content-type header
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+  // Send HTTP POST request
+  int httpResponseCode = http.POST(url);
+
+  if (httpResponseCode == 200) {
+    Serial.print("Mensagem enviada com sucesso!");
+  } else {
+    Serial.println("Erro na mensagem!");
+    Serial.print("HTTP response code: ");
+    Serial.println(httpResponseCode);
+  }
+  
+  // Free resources
+  http.end();
+}
+
+
+void setup()
+{
+  Serial.begin(115200);
+  dht.begin();
+
+  pinMode(SEL, INPUT_PULLUP);
+
+  servo1.attach(motor1);
+  pinMode(red, OUTPUT);
+  pinMode(green, OUTPUT);
+
+  pinMode(PIRpin, INPUT);
+  pinMode(foto_OD, INPUT);
+  digitalWrite(red,HIGH);
+
+  connect();
+  sendMessage("hewwo! Robozin ativando ");
+}
+
+void loop()
+{
+
+  int leituraBotao = digitalRead(SEL);
+
+  if (leituraBotao == LOW && ultimoEstadoBotao == HIGH && (millis() - tempoUltimoClique > tempoDebounce)) {
+    
+    sistemaLigado = !sistemaLigado; 
+    tempoUltimoClique = millis();
+
+    if (sistemaLigado) {
+      Serial.println("\n[SISTEMA LIGADO]");
+    } else {
+      Serial.println("\n[SISTEMA DESLIGADO]");
+    }
+  }
+
+  if(!sistemaLigado)
+  {
+    Serial.println("DESLIGANDO");
+    servo1.write(0);
+    delay(1000);
+  }
+  else
+  {
+    x = analogRead(vertical);
+    y = analogRead(horizontal);
+    float temperatura = dht.readTemperature();
+    float humidade = dht.readHumidity();
+    int luz = analogRead(foto_OD);
+    Movimento = digitalRead(PIRpin);
+
+    if (y < 500 && x > 1800 && x < 2300) {
+    servo1.write(90);
+    Serial.println("Indo para cima...");
+    delay(1000);
+  }
+  else if (y > 3500 && x > 1800 && x < 2300) {
+    servo1.write(0);
+    Serial.println("Indo para baixo...");
+    delay(1000);
+  }
+
+  else if (x < 500 && y > 1800 && y < 2300) {
+    servo1.write(45);
+    Serial.println("Indo para esquerda...");
+    delay(1000);
+  }
+
+  else if (x > 3500 && y > 1800 && y < 2300) {
+    servo1.write(135);
+    Serial.println("Indo para direita...");
+    delay(1000);
+  }
+    Serial.println("Tempratura: "+ String(temperatura)+"\n");
+    Serial.print("Humidade: "+String(humidade)+"\n");
+    Serial.println("Luminosidade: " +String(luz)+"\n");
+    if(Movimento == 1){Serial.println("Movimento encontrado");}
+    else{Serial.println("Movimento não detectado");}
+
+    float chanceVida = neuralNetwork(temperatura,humidade,luz,Movimento);
+
+    Serial.print("Chance de vida: ");
+    Serial.print(chanceVida); 
+    Serial.println("%");
+
+    if(chanceVida <= 75)
+    {
+      digitalWrite(green, HIGH);
+      digitalWrite(red, LOW);
+      Serial.println("Exploracao normal. Nenhum indicio relevante detectado");
+    }
+    else{
+      digitalWrite(red, HIGH);
+      digitalWrite(green, LOW);
+      Serial.println("ALERTA! Alta probabilidade de vida detectada!");
+      sendMessage("ALERTA! Alta probabilidade de vida detectada!");
+
+    }
+    delay(1000);
+  }
+}
